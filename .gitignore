@@ -1,0 +1,29 @@
+node_modules/
+npm-debug.log
+.env
+.env.local
+.env.*.local
+dist/
+build/
+
+# Docker
+.dockerignore
+
+# Airflow
+airflow/logs/
+airflow/plugins/__pycache__/
+airflow/dags/__pycache__/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database
+*.sql.bak
