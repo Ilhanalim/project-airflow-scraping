@@ -22,9 +22,11 @@ CREATE TABLE IF NOT EXISTS base.detik_scraping_jobs (
   category VARCHAR(100) DEFAULT 'all',
   sub_category VARCHAR(100),
   status VARCHAR(20) DEFAULT 'pending',
+  event_date DATE DEFAULT CURRENT_DATE,
   articles JSONB,
   article_count INTEGER DEFAULT 0,
   error_message TEXT,
+  log_messages JSONB DEFAULT '[]',
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW()
 );
@@ -32,6 +34,8 @@ CREATE TABLE IF NOT EXISTS base.detik_scraping_jobs (
 ALTER TABLE base.detik_scraping_jobs ADD COLUMN IF NOT EXISTS run_id UUID;
 ALTER TABLE base.detik_scraping_jobs ADD COLUMN IF NOT EXISTS category VARCHAR(100) DEFAULT 'all';
 ALTER TABLE base.detik_scraping_jobs ADD COLUMN IF NOT EXISTS sub_category VARCHAR(100);
+ALTER TABLE base.detik_scraping_jobs ADD COLUMN IF NOT EXISTS event_date DATE DEFAULT CURRENT_DATE;
+ALTER TABLE base.detik_scraping_jobs ADD COLUMN IF NOT EXISTS log_messages JSONB DEFAULT '[]';
 
 CREATE INDEX IF NOT EXISTS idx_detik_scraping_jobs_status ON base.detik_scraping_jobs(status);
 CREATE INDEX IF NOT EXISTS idx_detik_scraping_jobs_run_id ON base.detik_scraping_jobs(run_id);

@@ -65,7 +65,10 @@ def check_job_status(**context):
 
             status_data = response.json()
             status = status_data.get('status')
+            log_messages = status_data.get('log_messages')
             print(f"Job status attempt {attempt}/{MAX_POLL_ATTEMPTS}: {status_data}")
+            if log_messages:
+                print(f"API job logs: {log_messages}")
 
             if status == 'completed':
                 return status_data

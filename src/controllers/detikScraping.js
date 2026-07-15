@@ -24,16 +24,35 @@ const normalizeUrl = (value, baseUrl) => {
   }
 };
 
-const fetchWithRetry = async (url, options = {}, retries = 3, retryDelayMs = 2000) => {
+const appendJobLog = async (client, jobId, message) => {
+  await client.query(
+    `UPDATE base.detik_scraping_jobs
+     SET log_messages = COALESCE(log_messages, '[]'::jsonb) || to_jsonb($2::text),
+         updated_at = NOW()
+     WHERE job_id = $1`,
+    [jobId, message]
+  );
+};
+
+const logAndAppend = async (client, jobId, message) => {
+  console.log(message);
+  await appendJobLog(client, jobId, message);
+};
+
+const fetchWithRetry = async (client, jobId, url, options = {}, retries = 3, retryDelayMs = 2000) => {
   for (let attempt = 1; attempt <= retries; attempt += 1) {
     try {
       return await axios.get(url, options);
     } catch (error) {
       const retriableError = error.code === 'EAI_AGAIN' || error.code === 'ETIMEDOUT' || error.code === 'ECONNRESET' || error.code === 'ENOTFOUND';
+      const message = `Retry ${attempt}/${retries} for ${url} due to ${error.code || error.message}`;
+      if (client && jobId) {
+        await appendJobLog(client, jobId, message);
+      }
       if (!retriableError || attempt === retries) {
         throw error;
       }
-      console.warn(`Retry ${attempt}/${retries} for ${url} due to ${error.code || error.message}`);
+      console.warn(message);
       await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
     }
   }
@@ -170,11 +189,13 @@ const startTerpopulerJob = async (req, res) => {
 
     await pool.query(
       `INSERT INTO base.detik_scraping_jobs (
-         job_id, run_id, source_url, page_type, category, sub_category, status, created_at, updated_at
+         job_id, run_id, source_url, page_type, category, sub_category, status, event_date, log_messages, created_at, updated_at
        )
-       VALUES ($1, $1, $2, $3, $4, $5, $6, NOW(), NOW())`,
+       VALUES ($1, $1, $2, $3, $4, $5, $6, CURRENT_DATE, '[]'::jsonb, NOW(), NOW())`,
       [jobId, url, 'terpopuler', 'terpopuler', 'all', 'pending']
     );
+
+    await appendJobLog(pool, jobId, `Job initiated via API for ${url}`);
 
     res.json({
       jobId,
@@ -193,7 +214,8 @@ const scrapeTerpopulerAsync = async (jobId, url) => {
   const client = await pool.connect();
 
   try {
-    const response = await fetchWithRetry(url, { timeout: REQUEST_TIMEOUT_MS });
+    await logAndAppend(client, jobId, `Starting Detik terpopuler scrape for ${url}`);
+    const response = await fetchWithRetry(client, jobId, url, { timeout: REQUEST_TIMEOUT_MS });
     const categories = extractTerpopulerCategories(response.data, url);
     const targets = [
       { category: 'terpopuler', subCategory: 'all', url },
@@ -203,8 +225,10 @@ const scrapeTerpopulerAsync = async (jobId, url) => {
     let totalArticles = 0;
 
     for (const target of targets) {
-      const targetResponse = target.url === url ? response : await fetchWithRetry(target.url, { timeout: REQUEST_TIMEOUT_MS });
+      await logAndAppend(client, jobId, `Fetching target ${target.url}`);
+      const targetResponse = target.url === url ? response : await fetchWithRetry(client, jobId, target.url, { timeout: REQUEST_TIMEOUT_MS });
       const articles = extractTerpopulerArticles(targetResponse.data, target);
+      await appendJobLog(client, jobId, `Found ${articles.length} articles at ${target.url}`);
       const categoryJobId = target.subCategory === 'all' ? jobId : uuidv4();
 
       categoryRows.push([
@@ -246,9 +270,9 @@ const scrapeTerpopulerAsync = async (jobId, url) => {
     for (const row of categoryRows.slice(1)) {
       await client.query(
         `INSERT INTO base.detik_scraping_jobs (
-           job_id, run_id, source_url, page_type, category, sub_category, status, articles, article_count, created_at, updated_at
+           job_id, run_id, source_url, page_type, category, sub_category, status, event_date, articles, article_count, created_at, updated_at
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_DATE, $8, $9, NOW(), NOW())`,
         row
       );
     }
@@ -256,6 +280,7 @@ const scrapeTerpopulerAsync = async (jobId, url) => {
     await insertArticleDetails(client, categoryRows);
     await client.query('COMMIT');
 
+    await appendJobLog(client, jobId, `Job completed with ${totalArticles} articles from ${categoryRows.length} categories`);
     console.log(`Detik job ${jobId} completed with ${totalArticles} articles from ${categoryRows.length} categories`);
   } catch (error) {
     try {
@@ -271,6 +296,7 @@ const scrapeTerpopulerAsync = async (jobId, url) => {
          WHERE job_id = $3`,
         ['failed', error.message, jobId]
       );
+      await appendJobLog(client, jobId, `Job failed: ${error.message}`);
     } catch (dbError) {
       console.error(`Failed to update Detik job ${jobId}:`, dbError.message);
     }
@@ -313,7 +339,22 @@ const getStatus = async (req, res) => {
       return res.status(404).json({ error: 'Detik job not found' });
     }
 
-    res.json(result.rows[0]);
+    const logsResult = await pool.query(
+      `SELECT COALESCE(jsonb_agg(log_entry), '[]'::jsonb) AS log_messages
+       FROM (
+         SELECT jsonb_array_elements(log_messages) AS log_entry
+         FROM base.detik_scraping_jobs
+         WHERE ${getRunIdFilter}
+       ) AS log_entries`,
+      [jobId]
+    );
+
+    const statusRow = {
+      ...result.rows[0],
+      log_messages: logsResult.rows[0]?.log_messages || []
+    };
+
+    res.json(statusRow);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
