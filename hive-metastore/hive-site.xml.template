@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <property>
+        <name>metastore.warehouse.dir</name>
+        <value>@@WAREHOUSE_LOCATION@@</value>
+    </property>
+    <property>
+        <name>fs.s3a.endpoint</name>
+        <value>@@S3A_ENDPOINT@@</value>
+    </property>
+    <property>
+        <name>fs.s3a.access.key</name>
+        <value>@@S3A_ACCESS_KEY@@</value>
+    </property>
+    <property>
+        <name>fs.s3a.secret.key</name>
+        <value>@@S3A_SECRET_KEY@@</value>
+    </property>
+    <property>
+        <name>fs.s3a.path.style.access</name>
+        <value>true</value>
+    </property>
+    <property>
+        <name>fs.s3a.connection.ssl.enabled</name>
+        <value>false</value>
+    </property>
+    <property>
+        <name>fs.s3a.impl</name>
+        <value>org.apache.hadoop.fs.s3a.S3AFileSystem</value>
+    </property>
+</configuration>

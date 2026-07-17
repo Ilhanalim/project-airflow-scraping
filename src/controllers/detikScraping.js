@@ -1,7 +1,6 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
 const { v4: uuidv4 } = require('uuid');
-const pool = require('../utils/db');
 
 const DEFAULT_TERPOPULER_URL = 'https://www.detik.com/terpopuler';
 const CATEGORY_LIST_SELECTOR = 'body > div.container > div.grid-row.content__bg.mgt-16.mgb-16 > div.column-3';
@@ -24,35 +23,19 @@ const normalizeUrl = (value, baseUrl) => {
   }
 };
 
-const appendJobLog = async (client, jobId, message) => {
-  await client.query(
-    `UPDATE base.detik_scraping_jobs
-     SET log_messages = COALESCE(log_messages, '[]'::jsonb) || to_jsonb($2::text),
-         updated_at = NOW()
-     WHERE job_id = $1`,
-    [jobId, message]
-  );
-};
-
-const logAndAppend = async (client, jobId, message) => {
-  console.log(message);
-  await appendJobLog(client, jobId, message);
-};
-
-const fetchWithRetry = async (client, jobId, url, options = {}, retries = 3, retryDelayMs = 2000) => {
+const fetchWithRetry = async (url, options = {}, retries = 3, retryDelayMs = 2000) => {
   for (let attempt = 1; attempt <= retries; attempt += 1) {
     try {
       return await axios.get(url, options);
     } catch (error) {
-      const retriableError = error.code === 'EAI_AGAIN' || error.code === 'ETIMEDOUT' || error.code === 'ECONNRESET' || error.code === 'ENOTFOUND';
+      const retriableError = ['EAI_AGAIN', 'ETIMEDOUT', 'ECONNRESET', 'ENOTFOUND'].includes(error.code);
       const message = `Retry ${attempt}/${retries} for ${url} due to ${error.code || error.message}`;
-      if (client && jobId) {
-        await appendJobLog(client, jobId, message);
-      }
+      console.warn(message);
+
       if (!retriableError || attempt === retries) {
         throw error;
       }
-      console.warn(message);
+
       await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
     }
   }
@@ -70,16 +53,6 @@ const getSubCategoryFromUrl = (url) => {
   return segments[1] || 'all';
 };
 
-const getRunIdFilter = `
-  COALESCE(run_id, job_id) = (
-    SELECT COALESCE(run_id, job_id)
-    FROM base.detik_scraping_jobs
-    WHERE job_id = $1 OR run_id = $1
-    ORDER BY created_at ASC
-    LIMIT 1
-  )
-`;
-
 const extractTerpopulerCategories = (html, baseUrl) => {
   const $ = cheerio.load(html);
   const categoriesByUrl = new Map();
@@ -87,7 +60,6 @@ const extractTerpopulerCategories = (html, baseUrl) => {
   const links = categoryContainer.length > 0 ? categoryContainer.find('a') : $('.column-3 a');
 
   links.each((index, element) => {
-    const label = $(element).text().trim();
     const href = $(element).attr('href');
     const categoryUrl = normalizeUrl(href, baseUrl);
 
@@ -140,41 +112,41 @@ const extractTerpopulerArticles = (html, source) => {
   return articles;
 };
 
-const insertArticleDetails = async (client, categoryRows) => {
-  for (const row of categoryRows) {
-    const [scrapingJobId, runId, sourceUrl, pageType, category, subCategory, status, articlesJson] = row;
-    const articles = JSON.parse(articlesJson);
+const fetchTerpopulerData = async (url) => {
+  const response = await fetchWithRetry(url, { timeout: REQUEST_TIMEOUT_MS });
+  const categories = extractTerpopulerCategories(response.data, url);
+  const targets = [
+    { category: 'terpopuler', subCategory: 'all', url },
+    ...categories.filter((category) => category.subCategory !== 'all')
+  ];
 
-    if (status !== 'completed' || articles.length === 0) {
-      continue;
-    }
+  const categoryResults = [];
+  let totalArticles = 0;
 
-    for (const article of articles) {
-      await client.query(
-        `INSERT INTO base.detik_scraping_jobs_details (
-           detail_id, scraping_job_id, run_id, source_url, page_type, category, sub_category,
-           article_rank, title, link, image, article_category, published_text, raw_article, created_at
-         )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())`,
-        [
-          uuidv4(),
-          scrapingJobId,
-          runId,
-          sourceUrl,
-          pageType,
-          category,
-          subCategory,
-          article.rank,
-          article.title,
-          article.link,
-          article.image,
-          article.category,
-          article.publishedText,
-          JSON.stringify(article)
-        ]
-      );
-    }
+  for (const target of targets) {
+    const targetResponse = target.url === url ? response : await fetchWithRetry(target.url, { timeout: REQUEST_TIMEOUT_MS });
+    const articles = extractTerpopulerArticles(targetResponse.data, target);
+
+    categoryResults.push({
+      category: target.category,
+      subCategory: target.subCategory,
+      url: target.url,
+      articleCount: articles.length,
+      articles
+    });
+
+    totalArticles += articles.length;
   }
+
+  return {
+    jobId: uuidv4(),
+    sourceUrl: url,
+    pageType: 'terpopuler',
+    categories: categoryResults,
+    totalArticles,
+    eventDate: new Date().toISOString().slice(0, 10),
+    createdAt: new Date().toISOString()
+  };
 };
 
 const startTerpopulerJob = async (req, res) => {
@@ -185,214 +157,13 @@ const startTerpopulerJob = async (req, res) => {
       return res.status(400).json({ error: 'URL must be a valid detik.com URL' });
     }
 
-    const jobId = uuidv4();
-
-    await pool.query(
-      `INSERT INTO base.detik_scraping_jobs (
-         job_id, run_id, source_url, page_type, category, sub_category, status, event_date, log_messages, created_at, updated_at
-       )
-       VALUES ($1, $1, $2, $3, $4, $5, $6, CURRENT_DATE, '[]'::jsonb, NOW(), NOW())`,
-      [jobId, url, 'terpopuler', 'terpopuler', 'all', 'pending']
-    );
-
-    await appendJobLog(pool, jobId, `Job initiated via API for ${url}`);
-
-    res.json({
-      jobId,
-      message: 'Detik terpopuler scraping job initiated',
-      status: 'pending',
-      url
-    });
-
-    scrapeTerpopulerAsync(jobId, url);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-};
-
-const scrapeTerpopulerAsync = async (jobId, url) => {
-  const client = await pool.connect();
-
-  try {
-    await logAndAppend(client, jobId, `Starting Detik terpopuler scrape for ${url}`);
-    const response = await fetchWithRetry(client, jobId, url, { timeout: REQUEST_TIMEOUT_MS });
-    const categories = extractTerpopulerCategories(response.data, url);
-    const targets = [
-      { category: 'terpopuler', subCategory: 'all', url },
-      ...categories.filter((category) => category.subCategory !== 'all')
-    ];
-    const categoryRows = [];
-    let totalArticles = 0;
-
-    for (const target of targets) {
-      await logAndAppend(client, jobId, `Fetching target ${target.url}`);
-      const targetResponse = target.url === url ? response : await fetchWithRetry(client, jobId, target.url, { timeout: REQUEST_TIMEOUT_MS });
-      const articles = extractTerpopulerArticles(targetResponse.data, target);
-      await appendJobLog(client, jobId, `Found ${articles.length} articles at ${target.url}`);
-      const categoryJobId = target.subCategory === 'all' ? jobId : uuidv4();
-
-      categoryRows.push([
-        categoryJobId,
-        jobId,
-        target.url,
-        'terpopuler',
-        target.category,
-        target.subCategory,
-        'completed',
-        JSON.stringify(articles),
-        articles.length
-      ]);
-
-      totalArticles += articles.length;
-    }
-
-    await client.query('BEGIN');
-    await client.query('DELETE FROM base.detik_scraping_jobs_details WHERE run_id = $1', [jobId]);
-
-    await client.query(
-      `UPDATE base.detik_scraping_jobs
-       SET status = category_rows.status,
-           source_url = category_rows.source_url,
-           page_type = category_rows.page_type,
-           category = category_rows.category,
-           sub_category = category_rows.sub_category,
-           articles = category_rows.articles,
-           article_count = category_rows.article_count,
-           error_message = NULL,
-           updated_at = NOW()
-       FROM (
-         VALUES ($1::uuid, $2::uuid, $3::text, $4::text, $5::text, $6::text, $7::text, $8::jsonb, $9::integer)
-       ) AS category_rows(job_id, run_id, source_url, page_type, category, sub_category, status, articles, article_count)
-       WHERE base.detik_scraping_jobs.job_id = category_rows.job_id`,
-      categoryRows[0]
-    );
-
-    for (const row of categoryRows.slice(1)) {
-      await client.query(
-        `INSERT INTO base.detik_scraping_jobs (
-           job_id, run_id, source_url, page_type, category, sub_category, status, event_date, articles, article_count, created_at, updated_at
-         )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_DATE, $8, $9, NOW(), NOW())`,
-        row
-      );
-    }
-
-    await insertArticleDetails(client, categoryRows);
-    await client.query('COMMIT');
-
-    await appendJobLog(client, jobId, `Job completed with ${totalArticles} articles from ${categoryRows.length} categories`);
-    console.log(`Detik job ${jobId} completed with ${totalArticles} articles from ${categoryRows.length} categories`);
-  } catch (error) {
-    try {
-      await client.query('ROLLBACK');
-    } catch (rollbackError) {
-      console.error(`Failed to rollback Detik job ${jobId}:`, rollbackError.message);
-    }
-
-    try {
-      await pool.query(
-        `UPDATE base.detik_scraping_jobs
-         SET status = $1, error_message = $2, updated_at = NOW()
-         WHERE job_id = $3`,
-        ['failed', error.message, jobId]
-      );
-      await appendJobLog(client, jobId, `Job failed: ${error.message}`);
-    } catch (dbError) {
-      console.error(`Failed to update Detik job ${jobId}:`, dbError.message);
-    }
-
-    console.error(`Detik job ${jobId} failed:`, error.message);
-  } finally {
-    client.release();
-  }
-};
-
-const getStatus = async (req, res) => {
-  try {
-    const { jobId } = req.params;
-
-    const result = await pool.query(
-      `SELECT
-         COALESCE(
-           MIN(job_id::text) FILTER (WHERE sub_category = 'all'),
-           MIN(job_id::text)
-         )::uuid AS job_id,
-         MIN(source_url) FILTER (WHERE sub_category = 'all') AS source_url,
-         MIN(page_type) AS page_type,
-         MIN(category) AS category,
-         CASE
-           WHEN COUNT(*) FILTER (WHERE status = 'failed') > 0 THEN 'failed'
-           WHEN COUNT(*) FILTER (WHERE status = 'pending') > 0 THEN 'pending'
-           ELSE 'completed'
-         END AS status,
-         COALESCE(SUM(article_count), 0)::integer AS article_count,
-         COUNT(*)::integer AS category_count,
-         STRING_AGG(error_message, '; ') FILTER (WHERE error_message IS NOT NULL) AS error_message,
-         MIN(created_at) AS created_at,
-         MAX(updated_at) AS updated_at
-       FROM base.detik_scraping_jobs
-       WHERE ${getRunIdFilter}`,
-      [jobId]
-    );
-
-    if (result.rows.length === 0 || !result.rows[0].job_id) {
-      return res.status(404).json({ error: 'Detik job not found' });
-    }
-
-    const logsResult = await pool.query(
-      `SELECT COALESCE(jsonb_agg(log_entry), '[]'::jsonb) AS log_messages
-       FROM (
-         SELECT jsonb_array_elements(log_messages) AS log_entry
-         FROM base.detik_scraping_jobs
-         WHERE ${getRunIdFilter}
-       ) AS log_entries`,
-      [jobId]
-    );
-
-    const statusRow = {
-      ...result.rows[0],
-      log_messages: logsResult.rows[0]?.log_messages || []
-    };
-
-    res.json(statusRow);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-};
-
-const getResults = async (req, res) => {
-  try {
-    const { jobId } = req.params;
-
-    const result = await pool.query(
-      `SELECT job_id, run_id, source_url, page_type, category,
-              sub_category, status, articles, article_count, error_message, created_at, updated_at
-       FROM base.detik_scraping_jobs
-       WHERE ${getRunIdFilter}
-       ORDER BY
-         CASE WHEN sub_category = 'all' THEN 0 ELSE 1 END,
-         sub_category`,
-      [jobId]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Detik job not found' });
-    }
-
-    const allCategory = result.rows.find((row) => row.sub_category === 'all');
-    const categories = result.rows.filter((row) => row.sub_category !== 'all');
-
-    res.json({
-      ...(allCategory || result.rows[0]),
-      categories
-    });
+    const result = await fetchTerpopulerData(url);
+    res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 };
 
 module.exports = {
-  startTerpopulerJob,
-  getStatus,
-  getResults
+  startTerpopulerJob
 };

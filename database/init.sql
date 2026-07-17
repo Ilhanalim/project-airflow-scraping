@@ -65,3 +65,26 @@ CREATE INDEX IF NOT EXISTS idx_detik_scraping_jobs_details_job_id ON base.detik_
 CREATE INDEX IF NOT EXISTS idx_detik_scraping_jobs_details_run_id ON base.detik_scraping_jobs_details(run_id);
 CREATE INDEX IF NOT EXISTS idx_detik_scraping_jobs_details_category ON base.detik_scraping_jobs_details(category, sub_category);
 CREATE INDEX IF NOT EXISTS idx_detik_scraping_jobs_details_link ON base.detik_scraping_jobs_details(link);
+
+CREATE TABLE IF NOT EXISTS base.detik_scraping_processed_articles (
+  id UUID PRIMARY KEY,
+  job_id UUID NOT NULL,
+  source_url TEXT NOT NULL,
+  page_type VARCHAR(50) NOT NULL,
+  category VARCHAR(100) NOT NULL,
+  sub_category VARCHAR(100),
+  category_url TEXT,
+  article_rank INTEGER,
+  title TEXT NOT NULL,
+  link TEXT NOT NULL,
+  image TEXT,
+  article_category VARCHAR(100),
+  published_text TEXT,
+  event_date DATE,
+  created_at TIMESTAMP,
+  inserted_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_detik_scraping_processed_job_id ON base.detik_scraping_processed_articles(job_id);
+CREATE INDEX IF NOT EXISTS idx_detik_scraping_processed_category ON base.detik_scraping_processed_articles(category, sub_category);
+CREATE INDEX IF NOT EXISTS idx_detik_scraping_processed_article_rank ON base.detik_scraping_processed_articles(article_rank);

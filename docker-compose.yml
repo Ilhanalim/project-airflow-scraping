@@ -19,6 +19,27 @@ services:
       timeout: 5s
       retries: 5
 
+  minio:
+    image: minio/minio:latest
+    container_name: airflow-scraping-minio
+    command: server --console-address ":9001" /data
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - airflow-network
+  mc:
+    image: minio/mc:latest
+    container_name: airflow-scraping-mc
+    networks:
+      - airflow-network
+    entrypoint: ["tail", "-f", "/dev/null"]
+
   api:
     build:
       context: .
@@ -40,6 +61,8 @@ services:
         condition: service_healthy
     volumes:
       - ./src:/app/src
+      - ./tests:/app/tests
+      - ./package.json:/app/package.json
     networks:
       - airflow-network
 
@@ -57,18 +80,73 @@ services:
     networks:
       - airflow-network
 
+  hive-metastore-postgres:
+    image: postgres:15
+    container_name: hive-metastore-postgres
+    environment:
+      POSTGRES_DB: ${HIVE_METASTORE_DB_NAME}
+      POSTGRES_USER: ${HIVE_METASTORE_DB_USER}
+      POSTGRES_PASSWORD: ${HIVE_METASTORE_DB_PASSWORD}
+    volumes:
+      - hive_metastore_postgres_data:/var/lib/postgresql/data
+    networks:
+      - airflow-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${HIVE_METASTORE_DB_USER} -d ${HIVE_METASTORE_DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  hive-metastore:
+    build:
+      context: .
+      dockerfile: Dockerfile.hive-metastore
+    container_name: hive-metastore
+    environment:
+      DB_DRIVER: postgres
+      SERVICE_NAME: metastore
+      SERVICE_OPTS: >-
+        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
+        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://hive-metastore-postgres:5432/${HIVE_METASTORE_DB_NAME}
+        -Djavax.jdo.option.ConnectionUserName=${HIVE_METASTORE_DB_USER}
+        -Djavax.jdo.option.ConnectionPassword=${HIVE_METASTORE_DB_PASSWORD}
+      HADOOP_CLASSPATH: /opt/hadoop/share/hadoop/tools/lib/*
+      WAREHOUSE_LOCATION: s3a://${MINIO_BUCKET:-datalake}/warehouse
+      S3A_ENDPOINT: http://minio:9000
+      S3A_ACCESS_KEY: ${MINIO_ROOT_USER}
+      S3A_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "9083:9083"
+    depends_on:
+      hive-metastore-postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    networks:
+      - airflow-network
+    restart: on-failure
+
   airflow-webserver:
-    image: apache/airflow:2.8.4-python3.11
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
     container_name: airflow-webserver
+    user: root
     environment:
       AIRFLOW_HOME: /opt/airflow
       AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@airflow-postgres:5432/${AIRFLOW_DB_NAME}
       AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY:-airflow-dev-secret-change-me}
       AIRFLOW_UID: '50000'
       AIRFLOW_GID: '0'
       API_KEY: ${API_KEY}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET:-datalake}
+      HIVE_METASTORE_URI: thrift://hive-metastore:9083
     ports:
       - "8080:8080"
     depends_on:
@@ -76,20 +154,30 @@ services:
         condition: service_started
       api:
         condition: service_started
+      minio:
+        condition: service_started
+      hive-metastore:
+        condition: service_started
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
+      - ./airflow/scripts:/opt/airflow/scripts
+      - ./airflow/catalogs:/opt/airflow/catalogs
+      - spark_warehouse:/opt/airflow/spark-warehouse
     command: >
-      bash -c "airflow db init &&
+      bash -c "mkdir -p /opt/airflow/spark-warehouse && chown airflow:root /opt/airflow/spark-warehouse && \
+               airflow db init &&
                airflow users create --username ${AIRFLOW_ADMIN_USERNAME} --firstname ${AIRFLOW_ADMIN_FIRSTNAME} --lastname ${AIRFLOW_ADMIN_LASTNAME} --role Admin --email ${AIRFLOW_ADMIN_EMAIL} --password ${AIRFLOW_ADMIN_PASSWORD} 2>/dev/null || true &&
-               airflow webserver"
+               su airflow -c 'airflow webserver'"
     networks:
       - airflow-network
     restart: on-failure
 
   airflow-scheduler:
-    image: apache/airflow:2.8.4-python3.11
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
     container_name: airflow-worker-scheduler
     user: root
     environment:
@@ -98,18 +186,31 @@ services:
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@airflow-postgres:5432/${AIRFLOW_DB_NAME}
       AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY:-airflow-dev-secret-change-me}
       API_KEY: ${API_KEY}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET:-datalake}
+      HIVE_METASTORE_URI: thrift://hive-metastore:9083
     depends_on:
       airflow-postgres:
         condition: service_started
       api:
         condition: service_started
+      minio:
+        condition: service_started
+      hive-metastore:
+        condition: service_started
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
+      - ./airflow/scripts:/opt/airflow/scripts
+      - ./airflow/catalogs:/opt/airflow/catalogs
+      - spark_warehouse:/opt/airflow/spark-warehouse
     command: >
-      bash -c "chmod -R 777 /opt/airflow &&
+      bash -c "mkdir -p /opt/airflow/spark-warehouse && chown airflow:root /opt/airflow/spark-warehouse && chmod -R 777 /opt/airflow &&
                exec su airflow -c 'airflow scheduler'"
     networks:
       - airflow-network
@@ -122,3 +223,6 @@ networks:
 volumes:
   postgres_data:
   airflow_postgres_data:
+  hive_metastore_postgres_data:
+  minio_data:
+  spark_warehouse:

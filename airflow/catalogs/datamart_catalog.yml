@@ -1,0 +1,16 @@
+# Datamart catalog: PostgreSQL destination tables loaded from the lake.
+# Naming convention: hive = Hive tables in the metastore, datamart = PostgreSQL tables.
+
+_base_conf: &base_conf
+  layer: datamart
+  env: dev
+  database: base
+
+detik_scraping_processed_articles:
+  <<: *base_conf
+  table: detik_scraping_processed_articles
+  script_type: python
+  schedule: "@daily"
+  script_location: scripts/datamart/detik_scraping_processed_articles.py
+  source:
+    hive_table: scraping_detik

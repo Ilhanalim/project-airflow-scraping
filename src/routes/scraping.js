@@ -5,7 +5,5 @@ const requireApiKey = require('../middleware/apiKey');
 
 router.use(requireApiKey);
 router.post('/', scrapingController.scrapeData);
-router.get('/status/:jobId', scrapingController.getStatus);
-router.get('/results/:jobId', scrapingController.getResults);
 
 module.exports = router;

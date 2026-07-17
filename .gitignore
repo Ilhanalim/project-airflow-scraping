@@ -5,14 +5,15 @@ npm-debug.log
 .env.*.local
 dist/
 build/
+coverage/
 
 # Docker
 .dockerignore
 
 # Airflow
 airflow/logs/
-airflow/plugins/__pycache__/
-airflow/dags/__pycache__/
+**/__pycache__/
+*.pyc
 
 # IDE
 .vscode/

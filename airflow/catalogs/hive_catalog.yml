@@ -1,0 +1,39 @@
+# Central Hive catalog: every table managed by the Spark jobs is declared here.
+# DAGs load this file through dags/catalog.py and pass the derived values
+# (full name, s3a location, write conf) down to the executable scripts.
+#
+# Storage convention (see dags/catalog.py):
+#   s3a://{MINIO_BUCKET}/warehouse/{database}.db/{table}
+
+_base_conf: &base_conf
+  layer: foundation
+  env: dev
+  database: base
+
+scraping_detik:
+  <<: *base_conf
+  table: scraping_detik
+  script_type: pyspark
+  schedule: "@daily"
+  script_location: scripts/hive/scraping_detik.py
+  write_conf:
+    mode: overwrite
+    format: json            # switch to parquet when recreating the table
+    partition_columns:
+      event_date: string
+    schema:
+      job_id: string
+      source_url: string
+      page_type: string
+      created_at: string
+      category: string
+      sub_category: string
+      category_url: string
+      category_article_count: integer
+      article_rank: integer
+      title: string
+      link: string
+      image: string
+      article_category: string
+      published_text: string
+      event_date: string
