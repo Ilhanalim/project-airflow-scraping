@@ -5,6 +5,7 @@ const { v4: uuidv4 } = require('uuid');
 const DEFAULT_TERPOPULER_URL = 'https://www.detik.com/terpopuler';
 const CATEGORY_LIST_SELECTOR = 'body > div.container > div.grid-row.content__bg.mgt-16.mgb-16 > div.column-3';
 const REQUEST_TIMEOUT_MS = 60000;
+const CATEGORY_FETCH_CONCURRENCY = 4;
 
 const isValidDetikUrl = (value) => {
   try {
@@ -39,6 +40,22 @@ const fetchWithRetry = async (url, options = {}, retries = 3, retryDelayMs = 200
       await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
     }
   }
+};
+
+const mapWithConcurrency = async (items, concurrency, mapper) => {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+    }
+  });
+
+  await Promise.all(workers);
+  return results;
 };
 
 const getCategoryFromUrl = (url) => {
@@ -120,22 +137,23 @@ const fetchTerpopulerData = async (url) => {
     ...categories.filter((category) => category.subCategory !== 'all')
   ];
 
-  const categoryResults = [];
-  let totalArticles = 0;
-
-  for (const target of targets) {
+  const categoryResults = await mapWithConcurrency(targets, CATEGORY_FETCH_CONCURRENCY, async (target) => {
     const targetResponse = target.url === url ? response : await fetchWithRetry(target.url, { timeout: REQUEST_TIMEOUT_MS });
     const articles = extractTerpopulerArticles(targetResponse.data, target);
 
-    categoryResults.push({
+    return {
       category: target.category,
       subCategory: target.subCategory,
       url: target.url,
       articleCount: articles.length,
       articles
-    });
+    };
+  });
 
-    totalArticles += articles.length;
+  const totalArticles = categoryResults.reduce((sum, result) => sum + result.articleCount, 0);
+
+  if (totalArticles === 0) {
+    throw new Error(`No articles extracted from ${url} - page structure may have changed`);
   }
 
   return {

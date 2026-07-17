@@ -49,4 +49,17 @@ describe('POST /api/scrape/detik/terpopuler', () => {
     expect(res.body.totalArticles).toBeGreaterThan(0);
     expect(res.body.categories[0].articles[0].title).toBe('Judul Berita');
   });
+
+  it('fails loudly instead of returning empty data when selectors match nothing', async () => {
+    axios.get.mockReset();
+    axios.get.mockResolvedValue({ data: '<html><body>no articles here</body></html>' });
+
+    const res = await request(app)
+      .post('/api/scrape/detik/terpopuler')
+      .set(headers)
+      .send({ url: 'https://www.detik.com/terpopuler' });
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toMatch(/No articles extracted/);
+  });
 });
